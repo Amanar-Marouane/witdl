@@ -3,6 +3,7 @@
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 from . import __version__
@@ -213,6 +214,105 @@ def cmd_clean(args):
     print("\n  🧹 Cleaned failed download records.\n")
 
 
+def cmd_watch(args):
+    """Watch anime for new episodes and auto-download."""
+    import signal
+    import sys
+    from .scraper import fetch_episode_links, get_episode_url
+
+    config = load_config()
+    library = Library()
+
+    # Parse anime list
+    anime_entries = []
+    for query in args.anime:
+        anime = search_and_detect(query)
+        if anime:
+            anime_entries.append(anime)
+            print(f"  📺 Watching: {anime.name} ({anime.slug})")
+        else:
+            print(f"  ❌ Could not find: {query}")
+
+    if not anime_entries:
+        print("\n  Nothing to watch.")
+        return
+
+    interval = args.interval * 60  # convert to seconds
+    print(f"\n  ⏱️  Checking every {args.interval} minute(s)")
+    print(f"  Press Ctrl+C to stop\n")
+
+    # Graceful shutdown
+    running = True
+    def handle_signal(sig, frame):
+        nonlocal running
+        print("\n\n  🛑 Stopping watcher...")
+        running = False
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    check_count = 0
+    while running:
+        check_count += 1
+        print(f"\n{'='*50}")
+        print(f"  🔍 Check #{check_count} — {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"{'='*50}")
+
+        for anime in anime_entries:
+            lib_anime = library.get_or_create_anime(anime.name, anime.slug)
+            
+            # Check episodes 1-50 to find new ones
+            new_found = 0
+            for ep_num in range(1, 51):
+                if library.is_downloaded(anime.slug, ep_num):
+                    continue
+
+                # Try to fetch links for this episode
+                try:
+                    links = fetch_episode_links(anime.slug, ep_num)
+                    if not links:
+                        continue  # Episode doesn't exist yet
+                except Exception:
+                    continue
+
+                # New episode found!
+                ep = Episode(number=ep_num, links=links)
+                print(f"\n  🆕 New episode found: {anime.name} EP{ep_num:02d}")
+                print(f"     Links: {len(links)} ({', '.join(l.hoster for l in links[:3])})")
+
+                if not args.no_download:
+                    # Download it
+                    anime_short = anime.slug.split("-")[0][:20]
+                    output_dir = os.path.join(config.download_dir, anime.name)
+                    downloader = Downloader()
+                    result = downloader.download_episode(ep, output_dir, anime_short)
+                    library.update_episode(anime.slug, result)
+
+                    if result.status == DownloadStatus.COMPLETED:
+                        print(f"     ✅ Downloaded ({_format_size(result.size_bytes)})")
+                    else:
+                        print(f"     ❌ Failed: {result.error}")
+                else:
+                    print(f"     📋 Run 'witdl download {anime.slug} --episodes {ep_num}' to download")
+
+                new_found += 1
+                time.sleep(config.delay_between_episodes)
+
+            if new_found == 0:
+                print(f"  {anime.name}: No new episodes found")
+
+        if not running:
+            break
+
+        print(f"\n  💤 Next check in {args.interval} minute(s)...")
+        # Sleep in small intervals so we can respond to Ctrl+C
+        for _ in range(interval):
+            if not running:
+                break
+            time.sleep(1)
+
+    print("\n  👋 Watcher stopped.\n")
+
+
 def cmd_config(args):
     """Manage configuration."""
     config = load_config()
@@ -353,6 +453,13 @@ Examples:
     # queue
     p_queue = subparsers.add_parser("queue", help="Show download queue")
     p_queue.set_defaults(func=cmd_queue)
+
+    # watch
+    p_watch = subparsers.add_parser("watch", help="Auto-download new episodes as they release")
+    p_watch.add_argument("anime", nargs="+", help="Anime name(s) or URL(s) to watch")
+    p_watch.add_argument("--interval", "-i", type=int, default=30, help="Check interval in minutes (default: 30)")
+    p_watch.add_argument("--no-download", "-n", action="store_true", help="Only notify, don't download")
+    p_watch.set_defaults(func=cmd_watch)
 
     # config
     p_config = subparsers.add_parser("config", help="Manage configuration")
