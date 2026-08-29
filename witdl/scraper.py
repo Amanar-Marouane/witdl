@@ -65,6 +65,7 @@ def search(query: str) -> list[SearchResult]:
 
     # Pattern: episode URLs contain the anime slug
     # URLs use %d8%a7 (URL-encoded Arabic) for الحلقة
+    # e.g., /episode/tensei-shitara-slime-datta-ken-4th-season-%d8%a7...-20/
     ep_pattern = r'/episode/([a-z0-9-]+)-%d8%a7'
     for m in re.finditer(ep_pattern, html):
         slug = m.group(1)
@@ -85,7 +86,7 @@ def search(query: str) -> list[SearchResult]:
 
     # Fallback: extract from episode h2 titles
     if not results:
-        for m in re.finditer(r'<h2><a href="[^\"]+/episode/([a-z0-9-]+)-%d8%a7', html):
+        for m in re.finditer(r'<h2><a href="[^"]+/episode/([a-z0-9-]+)-%d8%a7', html):
             slug = m.group(1)
             if slug not in seen_slugs:
                 seen_slugs.add(slug)
@@ -96,30 +97,32 @@ def search(query: str) -> list[SearchResult]:
 
 
 def get_anime_info(anime_url: str) -> Optional[Anime]:
-    """Get anime details from an anime page.
-    
-    Since the anime page loads episodes via AJAX (encrypted), we construct
-    episode URLs from the known pattern. The user specifies episode range
-    when downloading.
-    """
+    """Get anime details and list of episode URLs from an anime page."""
+    html = _fetch(anime_url)
+
+    # Extract anime name
+    name_match = re.search(r'<h1[^>]*>([^<]+)</h1>', html)
+    name = name_match.group(1).strip() if name_match else "Unknown"
+
     # Extract slug from URL
     slug = anime_url.rstrip("/").split("/")[-1]
 
-    # Extract a readable name from slug
-    name = slug.replace("-", " ").title()
+    # Extract episode links
+    episodes = []
+    ep_pattern = r'href="(https?://witanime\.you/episode/([^"]+))"'
+    seen_urls = set()
+    for m in re.finditer(ep_pattern, html):
+        ep_url = m.group(1)
+        ep_slug = m.group(2)
+        if ep_url not in seen_urls:
+            seen_urls.add(ep_url)
+            # Extract episode number from slug
+            ep_num_match = re.search(r'-(\d+)/?$', ep_slug)
+            if ep_num_match:
+                ep_num = int(ep_num_match.group(1))
+                episodes.append(Episode(number=ep_num))
 
-    # Try to get the actual name from the page
-    try:
-        html = _fetch(anime_url)
-        name_match = re.search(r'<h1[^>]*>([^<]+)</h1>', html)
-        if name_match:
-            name = name_match.group(1).strip()
-    except Exception:
-        pass
-
-    # Since episodes are loaded via encrypted AJAX, we create episodes 1-50
-    # The download command will handle filtering (skipping 404s)
-    episodes = [Episode(number=i) for i in range(1, 51)]
+    episodes.sort(key=lambda e: e.number)
 
     return Anime(
         name=name,
@@ -183,43 +186,21 @@ def extract_download_links(html: str) -> list[Link]:
 
 
 def fetch_episode_links(anime_slug: str, episode_num: int) -> list[Link]:
-    """Fetch and decrypt download links for a specific episode.
-    Returns empty list if the episode page returns 404.
-    """
+    """Fetch and decrypt download links for a specific episode."""
     ep_url = get_episode_url(anime_slug, episode_num)
-    try:
-        html = _fetch(ep_url)
-        return extract_download_links(html)
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return []
-        raise
-    except Exception:
-        return []
+    html = _fetch(ep_url)
+    return extract_download_links(html)
 
 
 def fetch_all_episodes(anime: Anime) -> Anime:
-    """Fetch download links for all episodes of an anime. Modifies in place.
-    Skips episodes that return 404.
-    """
+    """Fetch download links for all episodes of an anime. Modifies in place."""
     config = load_config()
-    valid_episodes = []
     for ep in anime.episodes:
         try:
             ep.links = fetch_episode_links(anime.slug, ep.number)
-            if ep.links:
-                valid_episodes.append(ep)
-            else:
-                # Episode doesn't exist, skip it silently
-                pass
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                break  # No more episodes after 404
-            print(f"  [WARN] EP{ep.number:02d}: HTTP {e.code}")
         except Exception as e:
             print(f"  [WARN] EP{ep.number:02d}: {e}")
         time.sleep(config.delay_between_episodes)
-    anime.episodes = valid_episodes
     return anime
 
 
@@ -236,11 +217,11 @@ def search_and_detect(url_or_query: str) -> Optional[Anime]:
     """
     # Direct episode URL
     if "/episode/" in url_or_query:
-        m = re.search(r'/episode/([a-z0-9-]+)-', url_or_query)
+        m = re.search(r'/episode/([^/]+?)-(?:%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9|الحلقة)-(\d+)', url_or_query)
         if m:
             ep_slug = m.group(1)
             # Try to find the anime page
-            return get_anime_info(f"{BASE_URL}/anime/{ep_slug}/")
+            return _detect_anime_from_episode_slug(ep_slug)
 
     # Direct anime URL
     if "/anime/" in url_or_query:
@@ -251,4 +232,18 @@ def search_and_detect(url_or_query: str) -> Optional[Anime]:
     if results:
         return get_anime_info(results[0].url)
 
+    return None
+
+
+def _detect_anime_from_episode_slug(ep_slug: str) -> Optional[Anime]:
+    """Detect the anime from an episode slug by trying common patterns."""
+    # Try searching for the anime name extracted from the episode slug
+    # e.g., "crowned-in-a-hundred-days-bai-ri-cheng-wang" -> search for "crowned in a hundred days"
+    clean = re.sub(r'-bai-ri-cheng-wang$', '', ep_slug)
+    clean = re.sub(r'-\d+$', '', clean)
+    query = clean.replace("-", " ")
+
+    results = search(query)
+    if results:
+        return get_anime_info(results[0].url)
     return None

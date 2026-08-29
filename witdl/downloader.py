@@ -2,13 +2,19 @@
 
 import os
 import subprocess
+import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 from .config import load_config
 from .models import Episode, DownloadResult, DownloadStatus
 from .resolvers import get_resolver
+
+# Thread-safe print lock
+_print_lock = threading.Lock()
 
 
 @dataclass
@@ -211,6 +217,26 @@ class Downloader:
         except (subprocess.TimeoutExpired, Exception):
             return False
 
+    def _download_one(self, ep: Episode, output_dir: str, anime_short: str, on_done: Optional[Callable]) -> DownloadResult:
+        """Download a single episode (thread-safe)."""
+        with _print_lock:
+            print(f"\n  EP{ep.number:02d}: [{ep.best_link.quality.display if ep.best_link else '?'}] "
+                  f"{ep.best_link.hoster if ep.best_link else 'no links'}")
+
+        result = self.download_episode(ep, output_dir, anime_short)
+
+        with _print_lock:
+            if result.status == DownloadStatus.COMPLETED:
+                print(f"  EP{ep.number:02d}: ✅ Done ({_format_size(result.size_bytes)})")
+            else:
+                print(f"  EP{ep.number:02d}: ❌ Failed — {result.error}")
+            sys.stdout.flush()
+
+        if on_done:
+            on_done(result)
+
+        return result
+
     def download_anime(
         self,
         anime_name: str,
@@ -218,29 +244,49 @@ class Downloader:
         episodes: list[Episode],
         on_episode_done: Optional[Callable] = None,
     ) -> tuple[int, int]:
-        """Download all episodes. Returns (success_count, fail_count)."""
+        """Download all episodes concurrently. Returns (success_count, fail_count)."""
         output_dir = os.path.join(self.config.download_dir, anime_name)
         os.makedirs(output_dir, exist_ok=True)
 
+        max_workers = self.config.max_concurrent_downloads
         success = 0
         failed = 0
 
-        for ep in episodes:
-            print(f"\n  EP{ep.number:02d}: [{ep.best_link.quality.display if ep.best_link else '?'}] "
-                  f"{ep.best_link.hoster if ep.best_link else 'no links'}")
+        if max_workers <= 1 or len(episodes) <= 1:
+            # Sequential mode
+            for ep in episodes:
+                result = self._download_one(ep, output_dir, anime_short, on_episode_done)
+                if result.status == DownloadStatus.COMPLETED:
+                    success += 1
+                else:
+                    failed += 1
+                time.sleep(self.config.delay_between_episodes)
+        else:
+            # Concurrent mode
+            with _print_lock:
+                print(f"  ⚡ Downloading with {max_workers} concurrent connections\n")
 
-            result = self.download_episode(ep, output_dir, anime_short)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {}
+                for ep in episodes:
+                    future = executor.submit(
+                        self._download_one, ep, output_dir, anime_short, on_episode_done
+                    )
+                    futures[future] = ep.number
+                    # Small stagger to avoid hammering the server
+                    time.sleep(0.5)
 
-            if result.status == DownloadStatus.COMPLETED:
-                print(f"  EP{ep.number:02d}: ✅ Done ({_format_size(result.size_bytes)})")
-                success += 1
-            else:
-                print(f"  EP{ep.number:02d}: ❌ Failed — {result.error}")
-                failed += 1
-
-            if on_episode_done:
-                on_episode_done(result)
-
-            time.sleep(self.config.delay_between_episodes)
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()
+                        if result.status == DownloadStatus.COMPLETED:
+                            success += 1
+                        else:
+                            failed += 1
+                    except Exception as e:
+                        ep_num = futures[future]
+                        with _print_lock:
+                            print(f"  EP{ep_num:02d}: ❌ Exception — {e}")
+                        failed += 1
 
         return success, failed
