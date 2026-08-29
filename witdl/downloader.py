@@ -1,0 +1,246 @@
+"""Download engine with progress, retry, resume, and hoster fallback."""
+
+import os
+import subprocess
+import time
+from dataclasses import dataclass
+from typing import Callable, Optional
+
+from .config import load_config
+from .models import Episode, DownloadResult, DownloadStatus
+from .resolvers import get_resolver
+
+
+@dataclass
+class DownloadProgress:
+    """Progress info for a single download."""
+    episode: int
+    filename: str
+    bytes_downloaded: int = 0
+    total_bytes: int = 0
+    speed: float = 0.0  # bytes/sec
+    eta: int = 0  # seconds remaining
+
+
+def _format_size(size_bytes: int) -> str:
+    """Format bytes into human-readable string."""
+    if size_bytes < 1024:
+        return f"{size_bytes}B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f}KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f}MB"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024):.2f}GB"
+
+
+def _format_time(seconds: int) -> str:
+    """Format seconds into human-readable time."""
+    if seconds < 60:
+        return f"{seconds}s"
+    elif seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60}s"
+    else:
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        return f"{h}h {m}m"
+
+
+class Downloader:
+    """Download engine with retry, resume, and hoster fallback."""
+
+    def __init__(self, on_progress: Optional[Callable] = None):
+        self.config = load_config()
+        self.on_progress = on_progress
+
+    def download_episode(
+        self,
+        episode: Episode,
+        output_dir: str,
+        anime_short: str,
+        preferred_quality: str | None = None,
+    ) -> DownloadResult:
+        """Download a single episode, trying multiple hosters."""
+        os.makedirs(output_dir, exist_ok=True)
+
+        for attempt in range(self.config.max_retries + 1):
+            if attempt > 0:
+                wait = min(2 ** attempt, 30)
+                print(f"    Retry {attempt}/{self.config.max_retries} (waiting {wait}s...)")
+                time.sleep(wait)
+
+            # Try each link in priority order
+            for link in episode.links:
+                result = self._try_download(link, episode.number, output_dir, anime_short)
+                if result.status == DownloadStatus.COMPLETED:
+                    return result
+
+            # If all hosters failed, try resolving with different hosters
+            if attempt == 0:
+                # On first failure, try alternative hosters
+                for link in episode.links:
+                    resolver = get_resolver(link.hoster)
+                    if resolver:
+                        direct_url = resolver.resolve(link.url)
+                        if direct_url:
+                            result = self._download_file(
+                                direct_url, episode.number, output_dir, anime_short,
+                                link.hoster
+                            )
+                            if result.status == DownloadStatus.COMPLETED:
+                                return result
+
+        return DownloadResult(
+            episode_number=episode.number,
+            status=DownloadStatus.FAILED,
+            error="All hosters and retries exhausted",
+        )
+
+    def _try_download(
+        self, link, episode_num: int, output_dir: str, anime_short: str
+    ) -> DownloadResult:
+        """Try to download from a specific link."""
+        # Resolve to direct URL
+        resolver = get_resolver(link.hoster)
+        if resolver:
+            direct_url = resolver.resolve(link.url)
+            if direct_url:
+                return self._download_file(
+                    direct_url, episode_num, output_dir, anime_short, link.hoster
+                )
+
+        return DownloadResult(
+            episode_number=episode_num,
+            status=DownloadStatus.FAILED,
+            hoster_used=link.hoster,
+            error="Could not resolve direct URL",
+        )
+
+    def _download_file(
+        self,
+        url: str,
+        episode_num: int,
+        output_dir: str,
+        anime_short: str,
+        hoster: str,
+    ) -> DownloadResult:
+        """Download a file using wget/curl with resume support."""
+        filename = f"{anime_short}_EP{episode_num:02d}.mp4"
+        filepath = os.path.join(output_dir, filename)
+
+        # Check if already downloaded
+        if os.path.exists(filepath) and os.path.getsize(filepath) > 50 * 1024:
+            return DownloadResult(
+                episode_number=episode_num,
+                status=DownloadStatus.COMPLETED,
+                filepath=filepath,
+                size_bytes=os.path.getsize(filepath),
+                hoster_used=hoster,
+            )
+
+        # Try wget with resume
+        if self._wget_download(url, filepath):
+            return DownloadResult(
+                episode_number=episode_num,
+                status=DownloadStatus.COMPLETED,
+                filepath=filepath,
+                size_bytes=os.path.getsize(filepath),
+                hoster_used=hoster,
+            )
+
+        # Try curl with resume
+        if self._curl_download(url, filepath):
+            return DownloadResult(
+                episode_number=episode_num,
+                status=DownloadStatus.COMPLETED,
+                filepath=filepath,
+                size_bytes=os.path.getsize(filepath),
+                hoster_used=hoster,
+            )
+
+        # Cleanup failed download
+        for ext in ["", ".part", ".tmp"]:
+            p = filepath + ext
+            if os.path.exists(p):
+                os.remove(p)
+
+        return DownloadResult(
+            episode_number=episode_num,
+            status=DownloadStatus.FAILED,
+            hoster_used=hoster,
+            error="Download failed",
+        )
+
+    def _wget_download(self, url: str, filepath: str) -> bool:
+        """Download using wget with resume support."""
+        referer = "https://www.mp4upload.com/" if "mp4upload" in url else "https://witanime.you/"
+        cmd = [
+            "wget", "-q", "-c",
+            "-O", filepath,
+            "--timeout=60", "--tries=3",
+            f"--user-agent={self.config.user_agent}",
+            f"--referer={referer}",
+            url,
+        ]
+        try:
+            result = subprocess.run(
+                cmd, timeout=self.config.timeout_per_download, capture_output=True
+            )
+            return result.returncode == 0 and os.path.exists(filepath) and os.path.getsize(filepath) > 50 * 1024
+        except (subprocess.TimeoutExpired, Exception):
+            return False
+
+    def _curl_download(self, url: str, filepath: str) -> bool:
+        """Download using curl with resume support."""
+        referer = "https://www.mp4upload.com/" if "mp4upload" in url else "https://witanime.you/"
+        cmd = [
+            "curl", "-L", "-C", "-",
+            "-o", filepath,
+            "-H", f"User-Agent: {self.config.user_agent}",
+            "-H", f"Referer: {referer}",
+            "--connect-timeout", "30",
+            "--max-time", str(self.config.timeout_per_download),
+            "--silent",
+            url,
+        ]
+        try:
+            result = subprocess.run(
+                cmd, timeout=self.config.timeout_per_download + 30, capture_output=True
+            )
+            return result.returncode == 0 and os.path.exists(filepath) and os.path.getsize(filepath) > 50 * 1024
+        except (subprocess.TimeoutExpired, Exception):
+            return False
+
+    def download_anime(
+        self,
+        anime_name: str,
+        anime_short: str,
+        episodes: list[Episode],
+        on_episode_done: Optional[Callable] = None,
+    ) -> tuple[int, int]:
+        """Download all episodes. Returns (success_count, fail_count)."""
+        output_dir = os.path.join(self.config.download_dir, anime_name)
+        os.makedirs(output_dir, exist_ok=True)
+
+        success = 0
+        failed = 0
+
+        for ep in episodes:
+            print(f"\n  EP{ep.number:02d}: [{ep.best_link.quality.display if ep.best_link else '?'}] "
+                  f"{ep.best_link.hoster if ep.best_link else 'no links'}")
+
+            result = self.download_episode(ep, output_dir, anime_short)
+
+            if result.status == DownloadStatus.COMPLETED:
+                print(f"  EP{ep.number:02d}: ✅ Done ({_format_size(result.size_bytes)})")
+                success += 1
+            else:
+                print(f"  EP{ep.number:02d}: ❌ Failed — {result.error}")
+                failed += 1
+
+            if on_episode_done:
+                on_episode_done(result)
+
+            time.sleep(self.config.delay_between_episodes)
+
+        return success, failed

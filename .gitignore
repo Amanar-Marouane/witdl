@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.mp4
+*.mkv
+*.zip
+anime_downloads/
+anime/
+.witdl/
+*.log
