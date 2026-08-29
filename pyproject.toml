@@ -4,7 +4,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
 name = "witdl"
-version = "1.0.0"
+version = "0.1.0"
 description = "Advanced WitAnime downloader with search, multi-hoster support, and library management"
 readme = "README.md"
 requires-python = ">=3.10"
