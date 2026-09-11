@@ -14,7 +14,7 @@ WitDL is pre-1.0. Security fixes are applied to the latest release on the
 Please **do not** report security vulnerabilities through public GitHub issues,
 discussions, or pull requests.
 
-Instead, report them privately to `<CONTACT_EMAIL>`. If you prefer, you can use
+Instead, report them privately to marouane.amanar07@gmail.com. If you prefer, you can use
 GitHub's [private vulnerability reporting][gh-pvr] on the repository's
 **Security** tab.
 

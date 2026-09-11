@@ -29,10 +29,10 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/OWNER/witdl"
-Documentation = "https://github.com/OWNER/witdl/blob/main/docs/GUIDE.md"
-Changelog = "https://github.com/OWNER/witdl/blob/main/CHANGELOG.md"
-Issues = "https://github.com/OWNER/witdl/issues"
+Homepage = "https://github.com/Amanar-Marouane/witdl"
+Documentation = "https://github.com/Amanar-Marouane/witdl/blob/main/docs/GUIDE.md"
+Changelog = "https://github.com/Amanar-Marouane/witdl/blob/main/CHANGELOG.md"
+Issues = "https://github.com/Amanar-Marouane/witdl/issues"
 
 [project.scripts]
 witdl = "witdl.cli:main"

@@ -1,6 +1,6 @@
 # 🎬 WitDL — Advanced WitAnime Downloader
 
-[![CI](https://github.com/OWNER/witdl/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/witdl/actions/workflows/ci.yml)
+[![CI](https://github.com/Amanar-Marouane/witdl/actions/workflows/ci.yml/badge.svg)](https://github.com/Amanar-Marouane/witdl/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 
@@ -36,7 +36,7 @@ support, concurrent downloads, auto-watch, and library management.
 WitDL is a pure-Python package with **no runtime dependencies**.
 
 ```bash
-git clone https://github.com/OWNER/witdl.git
+git clone https://github.com/Amanar-Marouane/witdl.git
 cd witdl
 pip install -e .
 witdl --version   # WitDL 0.1.0

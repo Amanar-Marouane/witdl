@@ -20,7 +20,7 @@ WitDL targets **Python 3.10+** and uses **only the standard library** — please
 avoid adding runtime dependencies.
 
 ```bash
-git clone https://github.com/OWNER/witdl.git
+git clone https://github.com/Amanar-Marouane/witdl.git
 cd witdl
 
 # Editable install so the `witdl` command uses your checkout

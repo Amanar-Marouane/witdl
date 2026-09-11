@@ -23,7 +23,7 @@ WitDL is a pure-Python package with no runtime dependencies.
 ### From source (recommended while pre-1.0)
 
 ```bash
-git clone https://github.com/OWNER/witdl.git
+git clone https://github.com/Amanar-Marouane/witdl.git
 cd witdl
 pip install -e .
 witdl --version
