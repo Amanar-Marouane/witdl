@@ -318,6 +318,7 @@ witdl/
 ├── witdl.sh                  # Shell wrapper
 ├── pyproject.toml            # Package config
 ├── CHANGELOG.md              # Release history
+├── ROADMAP.md                # Shipped and planned work
 ├── CONTRIBUTING.md           # Contribution guide
 ├── CODE_OF_CONDUCT.md        # Community standards
 ├── SECURITY.md               # Security policy
@@ -376,6 +377,7 @@ hoster resolver. The full usage and architecture guide lives in
 - 🐛 [Report a bug](.github/ISSUE_TEMPLATE/bug_report.yml)
 - 💡 [Request a feature](.github/ISSUE_TEMPLATE/feature_request.yml)
 - 🔒 Report security issues privately — see [SECURITY.md](SECURITY.md)
+- 🗺️ [Roadmap](ROADMAP.md) — what's shipped and what's next
 - 📜 By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md)
 
 ## License
