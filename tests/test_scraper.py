@@ -2,7 +2,9 @@
 
 import base64
 import unittest
+from unittest import mock
 
+from witdl import scraper
 from witdl.scraper import (
     _xor_decrypt,
     _parse_episode_range,
@@ -230,6 +232,43 @@ class TestExtractDownloadLinks(unittest.TestCase):
         self.assertEqual(links[0].url, url1)
         self.assertEqual(links[1].url, url2)
         self.assertEqual(links[2].url, url3)
+
+
+class TestSearchAndDetectUrlNormalization(unittest.TestCase):
+    """Scheme-less URLs must be normalized before any network fetch."""
+
+    def test_schemeless_anime_url_normalized(self):
+        with mock.patch.object(scraper, "get_anime_info") as m_info:
+            scraper.search_and_detect("witanime.you/anime/foo/")
+        m_info.assert_called_once_with("https://witanime.you/anime/foo/")
+
+    def test_schemeless_url_with_leading_slash_normalized(self):
+        with mock.patch.object(scraper, "get_anime_info") as m_info:
+            scraper.search_and_detect("/witanime.you/anime/foo/")
+        m_info.assert_called_once_with("https://witanime.you/anime/foo/")
+
+    def test_schemeless_episode_url_normalized(self):
+        anime = object()
+        ep_url = "witanime.you/episode/%d9%81%d9%8a%d9%84%d9%85-the-ribbon-hero/"
+        with mock.patch.object(
+            scraper, "_detect_anime_from_episode_url", return_value=anime
+        ) as m_detect:
+            result = scraper.search_and_detect(ep_url)
+        self.assertIs(result, anime)
+        m_detect.assert_called_once_with(
+            "https://witanime.you/episode/%d9%81%d9%8a%d9%84%d9%85-the-ribbon-hero/"
+        )
+
+    def test_url_with_scheme_left_unchanged(self):
+        with mock.patch.object(scraper, "get_anime_info") as m_info:
+            scraper.search_and_detect("https://witanime.you/anime/foo/")
+        m_info.assert_called_once_with("https://witanime.you/anime/foo/")
+
+    def test_plain_query_not_treated_as_url(self):
+        with mock.patch.object(scraper, "search", return_value=[]) as m_search:
+            result = scraper.search_and_detect("iwamoto senpai")
+        self.assertIsNone(result)
+        m_search.assert_called_once_with("iwamoto senpai")
 
 
 if __name__ == "__main__":

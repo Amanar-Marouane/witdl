@@ -47,6 +47,7 @@ class Episode:
     """An episode with its download links."""
     number: int
     links: list[Link] = field(default_factory=list)
+    url: str = ""
 
     @property
     def best_link(self) -> Optional[Link]:

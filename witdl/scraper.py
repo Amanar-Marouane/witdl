@@ -51,6 +51,33 @@ def _parse_episode_range(spec: str) -> list[int]:
 # ─── Search & Browse ────────────────────────────────────────────────────────
 
 
+def _decode_episode_data(html: str) -> list[dict]:
+    """Decode the encrypted processedEpisodeData JS variable from an anime page.
+    
+    WitAnime now loads episodes dynamically via JavaScript. The episode data is
+    stored in a JS variable as base64.b64encode(XOR_encrypted_json) + '.' + base64.b64encode(key).
+    
+    Returns a list of dicts with keys: number, url, type, screenshot.
+    """
+    match = re.search(r"var processedEpisodeData\s*=\s*'([^']+)'", html)
+    if not match:
+        return []
+    try:
+        data = match.group(1)
+        if '.' not in data:
+            return []
+        parts = data.split('.', 1)
+        decoded_data = base64.b64decode(parts[0])
+        decoded_key = base64.b64decode(parts[1])
+        key_len = len(decoded_key)
+        result = ""
+        for i in range(len(decoded_data)):
+            result += chr(decoded_data[i] ^ decoded_key[i % key_len])
+        return json.loads(result)
+    except Exception:
+        return []
+
+
 def search(query: str) -> list[SearchResult]:
     """Search WitAnime for anime matching the query.
     
@@ -107,20 +134,32 @@ def get_anime_info(anime_url: str) -> Optional[Anime]:
     # Extract slug from URL
     slug = anime_url.rstrip("/").split("/")[-1]
 
-    # Extract episode links
+    # Preferred: decode encrypted episode data from JS variable (has real URLs)
     episodes = []
-    ep_pattern = r'href="(https?://witanime\.you/episode/([^"]+))"'
-    seen_urls = set()
-    for m in re.finditer(ep_pattern, html):
-        ep_url = m.group(1)
-        ep_slug = m.group(2)
-        if ep_url not in seen_urls:
-            seen_urls.add(ep_url)
-            # Extract episode number from slug
-            ep_num_match = re.search(r'-(\d+)/?$', ep_slug)
-            if ep_num_match:
-                ep_num = int(ep_num_match.group(1))
-                episodes.append(Episode(number=ep_num))
+    for ep_data in _decode_episode_data(html):
+        try:
+            ep_num = int(ep_data["number"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        ep_url = ep_data.get("url", "")
+        if ep_url.startswith("/"):
+            ep_url = BASE_URL + ep_url
+        episodes.append(Episode(number=ep_num, url=ep_url))
+
+    # Fallback: extract episode links from legacy HTML format
+    if not episodes:
+        ep_pattern = r'href="(https?://witanime\.you/episode/([^"]+))"'
+        seen_urls = set()
+        for m in re.finditer(ep_pattern, html):
+            ep_url = m.group(1)
+            ep_slug = m.group(2)
+            if ep_url not in seen_urls:
+                seen_urls.add(ep_url)
+                # Extract episode number from slug
+                ep_num_match = re.search(r'-(\d+)/?$', ep_slug)
+                if ep_num_match:
+                    ep_num = int(ep_num_match.group(1))
+                    episodes.append(Episode(number=ep_num, url=ep_url))
 
     episodes.sort(key=lambda e: e.number)
 
@@ -185,9 +224,15 @@ def extract_download_links(html: str) -> list[Link]:
     return results
 
 
-def fetch_episode_links(anime_slug: str, episode_num: int) -> list[Link]:
-    """Fetch and decrypt download links for a specific episode."""
-    ep_url = get_episode_url(anime_slug, episode_num)
+def fetch_episode_links(
+    anime_slug: str, episode_num: int, episode_url: str | None = None
+) -> list[Link]:
+    """Fetch and decrypt download links for a specific episode.
+
+    Uses the real episode URL when known (movies/specials don't follow the
+    numeric episode URL pattern); otherwise constructs one from the slug.
+    """
+    ep_url = episode_url or get_episode_url(anime_slug, episode_num)
     html = _fetch(ep_url)
     return extract_download_links(html)
 
@@ -197,7 +242,7 @@ def fetch_all_episodes(anime: Anime) -> Anime:
     config = load_config()
     for ep in anime.episodes:
         try:
-            ep.links = fetch_episode_links(anime.slug, ep.number)
+            ep.links = fetch_episode_links(anime.slug, ep.number, ep.url or None)
         except Exception as e:
             print(f"  [WARN] EP{ep.number:02d}: {e}")
         time.sleep(config.delay_between_episodes)
@@ -213,19 +258,37 @@ def search_and_detect(url_or_query: str) -> Optional[Anime]:
     Supports:
     - Direct anime URLs
     - Direct episode URLs (auto-detects parent anime)
+    - Search result URLs (e.g. ?search_param=animes&s=QUERY)
     - Search queries (picks first result)
     """
-    # Direct episode URL
+    # Normalize scheme-less URLs, e.g. "witanime.you/anime/foo/"
+    if not url_or_query.startswith(("http://", "https://")) and "witanime.you" in url_or_query:
+        url_or_query = "https://" + url_or_query.lstrip("/")
+
+    # Direct episode URL (episodes, movies, specials, ...)
     if "/episode/" in url_or_query:
+        # Best effort: fetch the episode page and follow its anime link
+        anime = _detect_anime_from_episode_url(url_or_query)
+        if anime:
+            return anime
+        # Fallback: guess the anime from the slug pattern
         m = re.search(r'/episode/([^/]+?)-(?:%D8%A7%D9%84%D8%AD%D9%84%D9%82%D8%A9|الحلقة)-(\d+)', url_or_query)
         if m:
-            ep_slug = m.group(1)
-            # Try to find the anime page
-            return _detect_anime_from_episode_slug(ep_slug)
+            return _detect_anime_from_episode_slug(m.group(1))
+        return None
 
     # Direct anime URL
     if "/anime/" in url_or_query:
         return get_anime_info(url_or_query)
+
+    # Search URL with query parameter (e.g. ?search_param=animes&s=QUERY)
+    search_match = re.search(r'[?&]s=([^&]+)', url_or_query)
+    if search_match:
+        query = urllib.parse.unquote(search_match.group(1))
+        results = search(query)
+        if results:
+            return get_anime_info(results[0].url)
+        return None
 
     # Search query
     results = search(url_or_query)
@@ -233,6 +296,22 @@ def search_and_detect(url_or_query: str) -> Optional[Anime]:
         return get_anime_info(results[0].url)
 
     return None
+
+
+def _detect_anime_from_episode_url(episode_url: str) -> Optional[Anime]:
+    """Detect the parent anime by reading the anime link off an episode page.
+
+    More reliable than parsing the slug, since movies/specials use different
+    URL shapes (e.g. /episode/فيلم-the-ribbon-hero/).
+    """
+    try:
+        html = _fetch(episode_url)
+    except Exception:
+        return None
+    m = re.search(r'href="(https?://witanime\.you/anime/[^"]+)"', html)
+    if not m:
+        return None
+    return get_anime_info(m.group(1))
 
 
 def _detect_anime_from_episode_slug(ep_slug: str) -> Optional[Anime]:

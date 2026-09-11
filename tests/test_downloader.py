@@ -95,6 +95,104 @@ class TestDownloader(unittest.TestCase):
             self.assertEqual(result.status, DownloadStatus.COMPLETED)
 
 
+class TestDownloaderQuality(unittest.TestCase):
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.config = Config(
+            download_dir=self.test_dir,
+            timeout_per_download=10,
+            max_retries=1,
+            delay_between_episodes=0,
+        )
+
+    def _run_with_recorded_links(self, episode, quality):
+        dl = Downloader()
+        seen = []
+
+        def fake_try(link, *args, **kwargs):
+            seen.append(link)
+            return DownloadResult(
+                episode_number=episode.number, status=DownloadStatus.COMPLETED
+            )
+
+        with patch.object(dl, "_try_download", side_effect=fake_try):
+            result = dl.download_episode(
+                episode, self.test_dir, "test", preferred_quality=quality
+            )
+        return result, seen
+
+    @patch("witdl.downloader.load_config")
+    def test_prefers_requested_quality(self, mock_config):
+        mock_config.return_value = self.config
+        ep = Episode(number=1, links=[
+            Link(hoster="mediafire", url="https://a/fhd", quality=Quality.FHD),
+            Link(hoster="mediafire", url="https://a/sd", quality=Quality.SD),
+        ])
+        result, seen = self._run_with_recorded_links(ep, "sd")
+        self.assertEqual(result.status, DownloadStatus.COMPLETED)
+        self.assertTrue(seen)
+        self.assertEqual(seen[0].quality, Quality.SD)
+
+    @patch("witdl.downloader.load_config")
+    def test_falls_back_when_quality_unavailable(self, mock_config):
+        mock_config.return_value = self.config
+        ep = Episode(number=1, links=[
+            Link(hoster="mediafire", url="https://a/fhd", quality=Quality.FHD),
+        ])
+        result, seen = self._run_with_recorded_links(ep, "sd")
+        self.assertEqual(result.status, DownloadStatus.COMPLETED)
+        self.assertTrue(seen)
+        self.assertEqual(seen[0].quality, Quality.FHD)
+
+    @patch("witdl.downloader.load_config")
+    def test_no_quality_preference_uses_all_links(self, mock_config):
+        mock_config.return_value = self.config
+        ep = Episode(number=1, links=[
+            Link(hoster="mediafire", url="https://a/fhd", quality=Quality.FHD),
+        ])
+        result, seen = self._run_with_recorded_links(ep, None)
+        self.assertEqual(result.status, DownloadStatus.COMPLETED)
+        self.assertEqual(seen[0].quality, Quality.FHD)
+
+
+class TestZipExtraction(unittest.TestCase):
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.dl = Downloader()
+
+    def test_extracts_video_and_renames(self):
+        import zipfile
+
+        filepath = os.path.join(self.test_dir, "show_EP01.mp4")
+        with zipfile.ZipFile(filepath, "w") as zf:
+            zf.writestr("[Site.com] Show EP 01.mp4", b"video-bytes")
+
+        result = self.dl._extract_zip_if_needed(filepath)
+
+        self.assertEqual(result, filepath)
+        self.assertTrue(os.path.exists(filepath))
+        with open(filepath, "rb") as f:
+            self.assertEqual(f.read(), b"video-bytes")
+
+    def test_returns_none_for_non_zip(self):
+        filepath = os.path.join(self.test_dir, "plain.mp4")
+        with open(filepath, "wb") as f:
+            f.write(b"\x00\x00\x00\x18ftypmp42")
+
+        self.assertIsNone(self.dl._extract_zip_if_needed(filepath))
+        self.assertTrue(os.path.exists(filepath))
+
+    def test_returns_none_for_zip_without_video(self):
+        import zipfile
+
+        filepath = os.path.join(self.test_dir, "show_EP02.mp4")
+        with zipfile.ZipFile(filepath, "w") as zf:
+            zf.writestr("readme.txt", b"no video here")
+
+        self.assertIsNone(self.dl._extract_zip_if_needed(filepath))
+        self.assertTrue(os.path.exists(filepath))
+
+
 class TestDownloaderWgetCurl(unittest.TestCase):
     def setUp(self):
         self.test_dir = tempfile.mkdtemp()

@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -69,6 +70,15 @@ class Downloader:
         """Download a single episode, trying multiple hosters."""
         os.makedirs(output_dir, exist_ok=True)
 
+        # Prefer links matching the requested quality, but fall back to any
+        # quality when none match so a download is still possible.
+        links = list(episode.links)
+        if preferred_quality:
+            requested = preferred_quality.value if hasattr(preferred_quality, "value") else str(preferred_quality)
+            matching = [l for l in links if l.quality.value == requested.lower()]
+            if matching:
+                links = matching
+
         for attempt in range(self.config.max_retries + 1):
             if attempt > 0:
                 wait = min(2 ** attempt, 30)
@@ -76,7 +86,7 @@ class Downloader:
                 time.sleep(wait)
 
             # Try each link in priority order
-            for link in episode.links:
+            for link in links:
                 result = self._try_download(link, episode.number, output_dir, anime_short)
                 if result.status == DownloadStatus.COMPLETED:
                     return result
@@ -84,7 +94,7 @@ class Downloader:
             # If all hosters failed, try resolving with different hosters
             if attempt == 0:
                 # On first failure, try alternative hosters
-                for link in episode.links:
+                for link in links:
                     resolver = get_resolver(link.hoster)
                     if resolver:
                         direct_url = resolver.resolve(link.url)
@@ -156,11 +166,13 @@ class Downloader:
 
         # Try curl with resume
         if self._curl_download(url, filepath):
+            # Extract video from ZIP if the hoster wrapped it
+            extracted = self._extract_zip_if_needed(filepath)
             return DownloadResult(
                 episode_number=episode_num,
                 status=DownloadStatus.COMPLETED,
-                filepath=filepath,
-                size_bytes=os.path.getsize(filepath),
+                filepath=extracted or filepath,
+                size_bytes=os.path.getsize(extracted or filepath),
                 hoster_used=hoster,
             )
 
@@ -176,6 +188,57 @@ class Downloader:
             hoster_used=hoster,
             error="Download failed",
         )
+
+    def _extract_zip_if_needed(self, filepath: str) -> str | None:
+        """If the downloaded file is a ZIP archive containing a video, extract it.
+        
+        Some hosters (e.g. mp4upload) wrap the video in a ZIP file.
+        Returns the path to the extracted video file, or None if not a ZIP.
+        """
+        try:
+            # Check ZIP magic bytes
+            with open(filepath, 'rb') as f:
+                magic = f.read(4)
+            if magic != b'PK\x03\x04':
+                return None
+
+            with zipfile.ZipFile(filepath, 'r') as zf:
+                # Find the first video file in the archive
+                video_exts = ('.mp4', '.mkv', '.avi', '.webm', '.mov')
+                video_name = None
+                for name in zf.namelist():
+                    if name.lower().endswith(video_exts):
+                        video_name = name
+                        break
+
+                if not video_name:
+                    return None
+
+                print(f"    📦 Extracting {os.path.basename(video_name)} from ZIP...")
+
+                # Extract the video to the same directory as the original file
+                output_dir = os.path.dirname(filepath)
+                extracted_path = os.path.join(output_dir, video_name)
+                with zf.open(video_name) as src, open(extracted_path, 'wb') as dst:
+                    while True:
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        dst.write(chunk)
+
+                # Rename to match the original expected filename if different
+                if extracted_path != filepath:
+                    final_path = filepath
+                    # Remove ZIP file first
+                    os.remove(filepath)
+                    # Rename extracted file to expected name
+                    os.rename(extracted_path, final_path)
+                    return final_path
+
+                return extracted_path
+
+        except (zipfile.BadZipFile, Exception):
+            return None
 
     def _wget_download(self, url: str, filepath: str) -> bool:
         """Download using wget with resume support."""
@@ -217,13 +280,20 @@ class Downloader:
         except (subprocess.TimeoutExpired, Exception):
             return False
 
-    def _download_one(self, ep: Episode, output_dir: str, anime_short: str, on_done: Optional[Callable]) -> DownloadResult:
+    def _download_one(
+        self,
+        ep: Episode,
+        output_dir: str,
+        anime_short: str,
+        on_done: Optional[Callable],
+        quality: str | None = None,
+    ) -> DownloadResult:
         """Download a single episode (thread-safe)."""
         with _print_lock:
             print(f"\n  EP{ep.number:02d}: [{ep.best_link.quality.display if ep.best_link else '?'}] "
                   f"{ep.best_link.hoster if ep.best_link else 'no links'}")
 
-        result = self.download_episode(ep, output_dir, anime_short)
+        result = self.download_episode(ep, output_dir, anime_short, preferred_quality=quality)
 
         with _print_lock:
             if result.status == DownloadStatus.COMPLETED:
@@ -243,6 +313,7 @@ class Downloader:
         anime_short: str,
         episodes: list[Episode],
         on_episode_done: Optional[Callable] = None,
+        quality: str | None = None,
     ) -> tuple[int, int]:
         """Download all episodes concurrently. Returns (success_count, fail_count)."""
         output_dir = os.path.join(self.config.download_dir, anime_name)
@@ -255,7 +326,9 @@ class Downloader:
         if max_workers <= 1 or len(episodes) <= 1:
             # Sequential mode
             for ep in episodes:
-                result = self._download_one(ep, output_dir, anime_short, on_episode_done)
+                result = self._download_one(
+                    ep, output_dir, anime_short, on_episode_done, quality
+                )
                 if result.status == DownloadStatus.COMPLETED:
                     success += 1
                 else:
@@ -270,7 +343,8 @@ class Downloader:
                 futures = {}
                 for ep in episodes:
                     future = executor.submit(
-                        self._download_one, ep, output_dir, anime_short, on_episode_done
+                        self._download_one,
+                        ep, output_dir, anime_short, on_episode_done, quality,
                     )
                     futures[future] = ep.number
                     # Small stagger to avoid hammering the server

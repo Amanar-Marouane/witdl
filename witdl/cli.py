@@ -17,8 +17,27 @@ from .scraper import (
 )
 
 
+def _looks_like_url(value: str) -> bool:
+    """Check whether a string is a URL rather than a search query."""
+    value = value.strip()
+    return value.startswith(("http://", "https://")) or "witanime.you/" in value
+
+
 def cmd_search(args):
     """Search for anime on WitAnime."""
+    # `search` takes a text query. If a URL was passed, route it instead of
+    # searching the site for the literal URL string.
+    if _looks_like_url(args.query):
+        print(f"\n  ⚠️  That looks like a URL, not a search query: {args.query}")
+        if getattr(args, "download", False):
+            print("  Downloading it now...\n")
+            cmd_download(argparse.Namespace(url_or_query=args.query, episodes=None))
+        else:
+            print("  Showing its info instead. To download it, run:")
+            print(f"    witdl download \"{args.query}\"\n")
+            cmd_info(argparse.Namespace(url_or_query=args.query))
+        return
+
     print(f"\n🔍 Searching for: {args.query}\n")
     results = search(args.query)
     if not results:
@@ -108,11 +127,13 @@ def cmd_download(args):
     def on_done(result):
         library.update_episode(anime.slug, result)
 
+    quality = getattr(args, "quality", None) or config.quality
     success, failed = downloader.download_anime(
         anime_name=anime.name,
         anime_short=anime_short,
         episodes=to_download,
         on_episode_done=on_done,
+        quality=quality,
     )
 
     # Summary
@@ -201,6 +222,7 @@ def cmd_retry(args):
                         ep,
                         os.path.join(load_config().download_dir, info["name"]),
                         anime_short,
+                        preferred_quality=load_config().quality,
                     )
                     library.update_episode(slug, result)
             except Exception as e:
@@ -284,7 +306,9 @@ def cmd_watch(args):
                     anime_short = anime.slug.split("-")[0][:20]
                     output_dir = os.path.join(config.download_dir, anime.name)
                     downloader = Downloader()
-                    result = downloader.download_episode(ep, output_dir, anime_short)
+                    result = downloader.download_episode(
+                        ep, output_dir, anime_short, preferred_quality=config.quality
+                    )
                     library.update_episode(anime.slug, result)
 
                     if result.status == DownloadStatus.COMPLETED:
@@ -418,7 +442,11 @@ Examples:
 
     # search
     p_search = subparsers.add_parser("search", help="Search for anime")
-    p_search.add_argument("query", help="Search query")
+    p_search.add_argument("query", help="Search query or URL")
+    p_search.add_argument(
+        "--download", "-d", action="store_true",
+        help="If the argument is a URL, download it instead of showing info",
+    )
     p_search.set_defaults(func=cmd_search)
 
     # info
