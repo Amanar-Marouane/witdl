@@ -380,4 +380,4 @@ hoster resolver. The full usage and architecture guide lives in
 
 ## License
 
-Released under the [MIT License](LICENSE). © 2026 WitDL Contributors.
+Released under the [MIT License](LICENSE). © 2026 Amanar Marouane.
